@@ -1,0 +1,83 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+
+jobs:
+  # ==================== CI 阶段 ====================
+  ci-phase:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 1. 打印所有环境变量，执行依赖安装、编译和打包
+      - name: Print environment variables
+        run: printenv
+
+      - name: Install dependencies and build
+        run: |
+          pip install -r requirements.txt
+          echo "Build completed successfully"
+
+      # 2. 使用项目根目录的 Dockerfile 构建镜像
+      # 3. 使用 YYYYmmddHHMMSS 格式的时间戳打标签
+      - name: Build Docker image with timestamp tag
+        id: build
+        run: |
+          TIMESTAMP=$(date +%Y%m%d%H%M%S)
+          echo "IMAGE_TAG=$TIMESTAMP" >> $GITHUB_ENV
+          docker build -t ${{ vars.DOCKER_USERNAME }}/ci-cd-quiz:$TIMESTAMP .
+
+      # 5 & 6. 登录 Docker Hub 并推送镜像
+      - name: Login to Docker Hub and push image
+        run: |
+          echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ vars.DOCKER_USERNAME }}" --password-stdin
+          docker push ${{ vars.DOCKER_USERNAME }}/ci-cd-quiz:${{ env.IMAGE_TAG }}
+
+      # 7. 导出镜像为 .tar 归档文件
+      - name: Export image as tar archive
+        run: docker save ${{ vars.DOCKER_USERNAME }}/ci-cd-quiz:${{ env.IMAGE_TAG }} -o image.tar
+
+      # 8. 上传 tar 归档文件
+      - name: Upload tar archive as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image-archive
+          path: image.tar
+
+      # 9. 在运行页面打印最终镜像版本信息
+      - name: Print final image version
+        run: echo "Final Image Version -> ${{ vars.DOCKER_USERNAME }}/ci-cd-quiz:${{ env.IMAGE_TAG }}"
+
+  # ==================== CD 阶段 ====================
+  cd-phase:
+    needs: ci-phase
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref == 'refs/heads/main' && 'PROD' || 'DEV' }}
+
+    steps:
+      # 1. 下载之前上传的 tar 归档文件
+      - name: Download tar archive
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image-archive
+
+      # 加载镜像到本地（必须步骤，否则无法 retag）
+      - name: Load Docker image from tar
+        run: docker load -i image.tar
+
+      # 2. 在原镜像标签后追加 suffix 变量的值进行重新打标签
+      - name: Retag image with environment suffix
+        run: |
+          ORIGINAL_IMAGE=$(docker images --format "{{.Repository}}:{{.Tag}}" | head -n 1)
+          NEW_TAG="${ORIGINAL_IMAGE}${{ vars.suffix }}"
+          docker tag $ORIGINAL_IMAGE $NEW_TAG
+          echo "Retagged image: $NEW_TAG"
+
+      # 3. 列出并打印当前环境中所有可用的本地镜像
+      - name: List all local images
+        run: docker images
